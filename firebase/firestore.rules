@@ -1,0 +1,70 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function me() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function isAdmin() { return signedIn() && me().role == 'ADMIN'; }
+    function isStaff() { return signedIn() && me().role in ['STAFF', 'ADMIN']; }
+    function autoConfirm() {
+      return get(/databases/$(database)/documents/settings/business).data.get('autoConfirm', true) == true;
+    }
+
+    // Profiles: users manage their own, but can never change their own role.
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isStaff());
+      allow create: if signedIn() && request.auth.uid == uid && request.resource.data.role == 'CUSTOMER';
+      allow update: if isAdmin()
+        || (request.auth.uid == uid && request.resource.data.get('role', 'CUSTOMER') == resource.data.get('role', 'CUSTOMER')
+            && request.resource.data.get('staffId', null) == resource.data.get('staffId', null));
+      allow delete: if signedIn() && (request.auth.uid == uid || isAdmin());
+    }
+
+    match /settings/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /services/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /staff/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /timeOff/{id} {
+      allow read: if signedIn();
+      allow create: if isAdmin() || (isStaff() && request.resource.data.staffId == me().staffId);
+      allow delete: if isAdmin() || (isStaff() && resource.data.staffId == me().staffId);
+    }
+
+    // One lock per taken time block. Holds no personal data, so any signed-in user can read
+    // them to work out free slots.
+    match /slotLocks/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn() && (isStaff()
+        || getAfter(/databases/$(database)/documents/appointments/$(request.resource.data.appointmentId)).data.customerId == request.auth.uid);
+      allow delete: if signedIn() && (isStaff()
+        || get(/databases/$(database)/documents/appointments/$(resource.data.appointmentId)).data.customerId == request.auth.uid);
+      allow update: if false;
+    }
+
+    match /appointments/{id} {
+      allow read: if signedIn() && (isStaff() || resource.data.customerId == request.auth.uid);
+      allow create: if isStaff()
+        || (signedIn() && request.resource.data.customerId == request.auth.uid
+            && (request.resource.data.status == 'PENDING' || (request.resource.data.status == 'CONFIRMED' && autoConfirm())));
+      allow update: if isStaff()
+        || (signedIn() && resource.data.customerId == request.auth.uid
+            && request.resource.data.customerId == request.auth.uid
+            && (request.resource.data.status == 'CANCELLED'
+                || request.resource.data.status == 'PENDING'
+                || (request.resource.data.status == 'CONFIRMED' && autoConfirm())));
+      allow delete: if isAdmin();
+    }
+  }
+}
